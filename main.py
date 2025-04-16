@@ -2,17 +2,17 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset, random_split
+from torch.cuda.amp import GradScaler, autocast
 import numpy as np
 import os
 import pickle
-
-NUM_FEATURES = 1
-NUM_TRAJECTORIES = 40000
 
 # ----------------------------
 #        DEVICE SETUP
 # ----------------------------
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Enable cuDNN autotuner for faster performance on fixed input sizes
+torch.backends.cudnn.benchmark = True
 
 
 # ----------------------------
@@ -44,6 +44,8 @@ class GRUModel(nn.Module):
 # ----------------------------
 #       DATA LOADING
 # ----------------------------
+NUM_FEATURES = 1
+NUM_TRAJECTORIES = 40000
 all_input = NUM_TRAJECTORIES
 input_arr = np.zeros((all_input, 2000, NUM_FEATURES))
 output_arr = np.zeros((all_input, 5))
@@ -90,7 +92,7 @@ with open("out_max_vals_intrinsic_Ca.pkl", "wb") as f:
 
 
 # ----------------------------
-#       TENSORS & DATASET
+#       DATASET PREP
 # ----------------------------
 input_tensor = torch.from_numpy(norm_in_arr).float().to(device)  # (N, 500, 3)
 output_tensor = torch.from_numpy(norm_out_arr).float().to(device)  # (N, 500, 3)
@@ -104,8 +106,13 @@ train_size = int(0.9 * dataset_size)
 val_size = dataset_size - train_size
 
 train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
-train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
-val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False)
+batch_size = 256
+train_loader = DataLoader(
+    train_dataset, batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=8
+)
+val_loader = DataLoader(
+    val_dataset, batch_size=batch_size, shuffle=False, pin_memory=True, num_workers=8
+)
 
 
 # ----------------------------
@@ -121,16 +128,18 @@ bidirectional = False
 model = GRUModel(
     input_dim, hidden_dim, output_dim, num_layers, bidirectional, dropout
 ).to(device)
+# Optional: Compile model (requires PyTorch 2.0+)
+model = torch.compile(model)
 
 # We will have a combined loss for trajectory and parameter
 criterion = nn.MSELoss()
 optimizer = optim.AdamW(model.parameters(), lr=0.01)
-
+scaler = GradScaler()
 
 # ----------------------------
 #      TRAINING LOOP
 # ----------------------------
-num_epochs = 50
+num_epochs = 200
 best_val_loss = float("inf")
 
 for epoch in range(num_epochs):
@@ -138,20 +147,20 @@ for epoch in range(num_epochs):
     running_train_loss = 0.0
 
     for batch_X, batch_y in train_loader:
-        batch_X = batch_X.to(device)
-        batch_y = batch_y.to(device)
 
         optimizer.zero_grad()
 
-        # Forward pass
-        pred_output = model(batch_X)
+        with autocast():
+            # Forward pass
+            pred_output = model(batch_X)
 
-        # Calculate combined loss
-        loss = criterion(pred_output, batch_y)
+            # Calculate combined loss
+            loss = criterion(pred_output, batch_y)
 
         # Backward and optimize
-        loss.backward()
-        optimizer.step()
+        scaler.scale(loss).backward
+        scaler.step(optimizer)
+        scaler.update()
 
         running_train_loss += loss.item()
 
@@ -162,12 +171,11 @@ for epoch in range(num_epochs):
     running_val_loss = 0.0
     with torch.no_grad():
         for val_X, val_y in val_loader:
-            val_X = val_X.to(device)
-            val_y = val_y.to(device)
+            with autocast():
 
-            pred_output_val = model(val_X)
-            val_loss = criterion(pred_output_val, val_y)
-            running_val_loss += val_loss.item()
+                pred_output_val = model(val_X)
+                val_loss = criterion(pred_output_val, val_y)
+                running_val_loss += val_loss.item()
 
     val_loss = running_val_loss / len(val_loader)
 
