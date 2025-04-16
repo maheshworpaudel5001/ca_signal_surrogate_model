@@ -6,6 +6,7 @@ from torch.amp import GradScaler, autocast
 import numpy as np
 import os
 import pickle
+from models import GRUModel
 
 # ----------------------------
 #        DEVICE SETUP
@@ -13,32 +14,6 @@ import pickle
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # Enable cuDNN autotuner for faster performance on fixed input sizes
 torch.backends.cudnn.benchmark = True
-
-
-# ----------------------------
-#       MODEL CLASSES
-# ----------------------------
-class GRUModel(nn.Module):
-    def __init__(
-        self, input_dim, hidden_dim, output_dim, num_layers, bidirectional, dropout
-    ):
-        super(GRUModel, self).__init__()
-        self.gru = nn.GRU(
-            input_dim,
-            hidden_dim,
-            num_layers=num_layers,
-            batch_first=True,
-            bidirectional=bidirectional,
-            dropout=dropout,
-        )
-        self.fc = nn.Linear(hidden_dim * (2 if bidirectional else 1), output_dim)
-
-    def forward(self, x):
-        out, hn = self.gru(x)
-        out = self.fc(out[:, -1, :])
-        out = torch.relu(out)
-
-        return out
 
 
 # ----------------------------
@@ -196,4 +171,4 @@ for epoch in range(num_epochs):
         print(
             f"Epoch [{epoch+1}/{num_epochs}], "
             f"Train Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}"
-        )åå
+        )
