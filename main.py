@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset, random_split
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 import numpy as np
 import os
 import pickle
@@ -94,8 +94,8 @@ with open("out_max_vals_intrinsic_Ca.pkl", "wb") as f:
 # ----------------------------
 #       DATASET PREP
 # ----------------------------
-input_tensor = torch.from_numpy(norm_in_arr).float().to(device)  # (N, 500, 3)
-output_tensor = torch.from_numpy(norm_out_arr).float().to(device)  # (N, 500, 3)
+input_tensor = torch.from_numpy(norm_in_arr).float()  # (N, 500, 3)
+output_tensor = torch.from_numpy(norm_out_arr).float()  # (N, 500, 3)
 
 # Create a single dataset with three outputs
 dataset = TensorDataset(input_tensor, output_tensor)
@@ -133,8 +133,8 @@ model = torch.compile(model)
 
 # We will have a combined loss for trajectory and parameter
 criterion = nn.MSELoss()
-optimizer = optim.AdamW(model.parameters(), lr=0.01)
-scaler = GradScaler()
+optimizer = optim.AdamW(model.parameters(), lr=0.001)
+scaler = GradScaler(device="cuda")
 
 # ----------------------------
 #      TRAINING LOOP
@@ -147,10 +147,12 @@ for epoch in range(num_epochs):
     running_train_loss = 0.0
 
     for batch_X, batch_y in train_loader:
+        batch_X = batch_X.to(device)
+        batch_y = batch_y.to(device)
 
         optimizer.zero_grad()
 
-        with autocast():
+        with autocast(device_type="cuda"):
             # Forward pass
             pred_output = model(batch_X)
 
@@ -158,7 +160,7 @@ for epoch in range(num_epochs):
             loss = criterion(pred_output, batch_y)
 
         # Backward and optimize
-        scaler.scale(loss).backward
+        scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
 
@@ -171,7 +173,10 @@ for epoch in range(num_epochs):
     running_val_loss = 0.0
     with torch.no_grad():
         for val_X, val_y in val_loader:
-            with autocast():
+            val_X = val_X.to(device)
+            val_y = val_y.to(device)
+
+            with autocast(device_type="cuda"):
 
                 pred_output_val = model(val_X)
                 val_loss = criterion(pred_output_val, val_y)
@@ -191,4 +196,4 @@ for epoch in range(num_epochs):
         print(
             f"Epoch [{epoch+1}/{num_epochs}], "
             f"Train Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}"
-        )
+        )åå
