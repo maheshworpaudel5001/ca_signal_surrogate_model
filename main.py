@@ -81,12 +81,22 @@ train_size = int(0.9 * dataset_size)
 val_size = dataset_size - train_size
 
 train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
-batch_size = 256
+batch_size = 1024
 train_loader = DataLoader(
-    train_dataset, batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=8
+    train_dataset,
+    batch_size=batch_size,
+    shuffle=True,
+    pin_memory=True,
+    num_workers=8,
+    drop_last=True,
 )
 val_loader = DataLoader(
-    val_dataset, batch_size=batch_size, shuffle=False, pin_memory=True, num_workers=8
+    val_dataset,
+    batch_size=batch_size,
+    shuffle=False,
+    pin_memory=True,
+    num_workers=8,
+    drop_last=True,
 )
 
 
