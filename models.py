@@ -22,3 +22,18 @@ class GRUModel(nn.Module):
         out = self.fc(out[:, -1, :])
         out = torch.relu(out)
         return out
+
+
+class SurrogateCaModel(nn.Module):
+    def __init__(self, input_dim=5, hidden_dim=64, output_dim=280):
+        super().__init__()
+        self.model = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, output_dim),
+        )
+
+    def forward(self, x):
+        return self.model(x)

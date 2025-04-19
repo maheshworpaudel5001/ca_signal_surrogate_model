@@ -7,6 +7,9 @@ import numpy as np
 import pickle
 from models import GRUModel
 from sklearn.preprocessing import MinMaxScaler
+from run_bngl_avg import run_bionetgen_avg  # date April 11, 2025
+from solve_ca_ode2 import solve_ca
+import pandas as pd
 
 # ----------------------------
 #        DEVICE SETUP
@@ -84,10 +87,8 @@ val_loader = DataLoader(
 input_dim = NUM_FEATURES
 hidden_dim = 128
 output_dim = 5
-num_layers = 5  # number of GRU layers
-dropout = (
-    0.1 if num_layers > 1 else 0.0
-)  # dropout probability is the same for all layers regressors
+num_layers = 1  # number of GRU layers
+dropout = 0.0  # dropout probability is the same for all layers regressors
 bidirectional = False
 
 model = GRUModel(
@@ -98,13 +99,28 @@ model = torch.compile(model)
 
 # We will have a combined loss for trajectory and parameter
 criterion = nn.MSELoss()
-optimizer = optim.AdamW(model.parameters(), lr=0.0001)
+optimizer = optim.AdamW(model.parameters(), lr=0.001)
 scaler = GradScaler(device="cuda")
+
+
+# ----------------------------
+#   Predict on external data during training
+# ----------------------------
+fin_data = pd.read_csv("M_46L_50F.dat", sep="\t", comment="#", header=None)
+fin_data_y = fin_data.iloc[:, 1].to_numpy().reshape(-1, 1)  # shape: (2000, 1)
+# Scale using the input scaler from training
+test_data = input_scaler.transform(fin_data_y).reshape(1, fin_data_y.shape[0], 1)
+test_tensor = torch.from_numpy(test_data).float().to(device)
+
+data = pd.read_csv(
+    "expt_ca_data/46L_50F_100k.dat", sep="\t", comment="#", header=None
+)  # ZAP only
+ca_signal_data = data.iloc[:, 1].values
 
 # ----------------------------
 #      TRAINING LOOP
 # ----------------------------
-num_epochs = 200
+num_epochs = 50
 best_val_loss = float("inf")
 
 for epoch in range(num_epochs):
@@ -115,7 +131,7 @@ for epoch in range(num_epochs):
         batch_X = batch_X.to(device)
         batch_y = batch_y.to(device)
 
-        optimizer.zero_grad(set_to_none=True)
+        optimizer.zero_grad()
 
         with autocast(device_type="cuda"):
             # Forward pass
@@ -135,8 +151,23 @@ for epoch in range(num_epochs):
 
     # Validation
     model.eval()
-    running_val_loss = 0.0
     with torch.no_grad():
+        ######################################
+        ########## TRAJECTORY LOSS ###########
+        ######################################
+        pred_on_test_tensor = model(test_tensor).cpu().numpy()
+        estimates = output_scaler.inverse_transform(pred_on_test_tensor)
+        kon, koff, C1, C2, g = estimates[0]
+
+        time, mean_pZAP = run_bionetgen_avg(3, 1, kon, koff)
+        tnew, ca_pred = solve_ca(time, mean_pZAP, C1, C2, g)  # solving the ODEs
+
+        denom = np.max(ca_signal_data)
+        diff = (ca_pred[26:] - ca_signal_data) / denom
+        diff = np.nan_to_num(diff, nan=0.0, posinf=1e3, neginf=-1e3)
+        diff = np.clip(diff, -1e3, 1e3)
+        running_val_loss = np.sum(diff**2)
+
         for val_X, val_y in val_loader:
             val_X = val_X.to(device)
             val_y = val_y.to(device)
@@ -152,7 +183,11 @@ for epoch in range(num_epochs):
     # Save best model
     if val_loss < best_val_loss:
         best_val_loss = val_loss
-        torch.save(model.state_dict(), "intrinsic_Ca_model1.pth")
+        torch.save(model.state_dict(), "intrinsic_Ca_model2.pth")
+        output_df = pd.DataFrame(
+            {"time": tnew[26:], "ca_data": ca_signal_data, "ca_pred": ca_pred[26:]}
+        )
+        output_df.to_csv("best_prediction_ca_signal.csv", sep=",", index=False)
         print(
             f"Epoch [{epoch+1}/{num_epochs}], "
             f"Train Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f} -- Model saved"

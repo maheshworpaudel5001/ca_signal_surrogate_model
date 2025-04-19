@@ -5,8 +5,11 @@ from torch.utils.data import DataLoader, TensorDataset, random_split
 from torch.amp import GradScaler, autocast
 import numpy as np
 import pickle
-from models import GRUModel
+from models import GRUModel, SurrogateCaModel
 from sklearn.preprocessing import MinMaxScaler
+from run_bngl_avg import run_bionetgen_avg  # date April 11, 2025
+from solve_ca_ode2 import solve_ca
+import pandas as pd
 
 # ----------------------------
 #        DEVICE SETUP
@@ -84,27 +87,45 @@ val_loader = DataLoader(
 input_dim = NUM_FEATURES
 hidden_dim = 128
 output_dim = 5
-num_layers = 5  # number of GRU layers
+num_layers = 3  # number of GRU layers
 dropout = (
     0.1 if num_layers > 1 else 0.0
 )  # dropout probability is the same for all layers regressors
 bidirectional = False
 
-model = GRUModel(
+gru_model = GRUModel(
     input_dim, hidden_dim, output_dim, num_layers, bidirectional, dropout
 ).to(device)
+surrogate_model = SurrogateCaModel(input_dim=5, hidden_dim=64, output_dim=2000).to(
+    device
+)
 # Optional: Compile model (requires PyTorch 2.0+)
-model = torch.compile(model)
+model = torch.compile(gru_model)
 
-# We will have a combined loss for trajectory and parameter
-criterion = nn.MSELoss()
-optimizer = optim.AdamW(model.parameters(), lr=0.0001)
+# Losses and optimizers
+param_criterion = nn.MSELoss()
+traj_criterion = nn.MSELoss()
+optimizer = optim.AdamW(gru_model.parameters(), lr=0.0001)
 scaler = GradScaler(device="cuda")
+
+# Load surrogate weights (already trained)
+surrogate_model.load_state_dict(torch.load("surrogate_model.pth", map_location=device))
+surrogate_model.eval()
+
+
+# ----------------------------
+#   Predict on external data during training
+# ----------------------------
+fin_data = pd.read_csv("M_46L_50F.dat", sep="\t", comment="#", header=None)
+fin_data_y = fin_data.iloc[:, 1].to_numpy().reshape(-1, 1)  # shape: (2000, 1)
+# Scale using the input scaler from training
+test_data = input_scaler.transform(fin_data_y).reshape(1, fin_data_y.shape[0], 1)
+test_tensor = torch.from_numpy(test_data).float().to(device)
 
 # ----------------------------
 #      TRAINING LOOP
 # ----------------------------
-num_epochs = 200
+num_epochs = 250
 best_val_loss = float("inf")
 
 for epoch in range(num_epochs):
@@ -119,10 +140,16 @@ for epoch in range(num_epochs):
 
         with autocast(device_type="cuda"):
             # Forward pass
-            pred_output = model(batch_X)
+            pred_params = model(batch_X)
 
-            # Calculate combined loss
-            loss = criterion(pred_output, batch_y)
+            # Inverse transform the normalized output (GRU → real parameter values)
+            # pred_params_np = pred_params.detach().cpu().numpy()
+            # pred_params_real = output_scaler.inverse_transform(pred_params_np)
+            # pred_params = torch.from_numpy(pred_params_real).float().to(device)
+            pred_ca = surrogate_model(pred_params)
+
+            param_loss = param_criterion(pred_params, batch_y)
+            loss = param_loss
 
         # Backward and optimize
         scaler.scale(loss).backward()
@@ -142,17 +169,28 @@ for epoch in range(num_epochs):
             val_y = val_y.to(device)
 
             with autocast(device_type="cuda"):
+                pred_params_val = model(val_X)
+                pred_ca_val = surrogate_model(pred_params_val)
 
-                pred_output_val = model(val_X)
-                val_loss = criterion(pred_output_val, val_y)
-                running_val_loss += val_loss.item()
+                params_val_loss = param_criterion(pred_params_val, val_y)
+                traj_val_loss = traj_criterion(pred_ca_val, val_X.squeeze(-1))
+                val_loss = params_val_loss + traj_val_loss
+                running_val_loss += loss.item()
 
     val_loss = running_val_loss / len(val_loader)
 
     # Save best model
     if val_loss < best_val_loss:
         best_val_loss = val_loss
-        torch.save(model.state_dict(), "intrinsic_Ca_model1.pth")
+        torch.save(model.state_dict(), "intrinsic_Ca_model3.pth")
+        # output_df = pd.DataFrame(
+        #     {
+        #         "time": fin_data.iloc[:, 0],
+        #         "ca_data": fin_data.iloc[:, 1],
+        #         "ca_pred": pred_ca_val,
+        #     }
+        # )
+        # output_df.to_csv("best_prediction_ca_signal_from_model3.csv", sep=",")
         print(
             f"Epoch [{epoch+1}/{num_epochs}], "
             f"Train Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f} -- Model saved"
