@@ -1,5 +1,4 @@
- # Ignore all .npy files
- *.npy
+ *.npy # Ignore all .npy files
  average_pzap_output/*
  best_prediction_ca_signal.csv
  expt_ca_data/*
